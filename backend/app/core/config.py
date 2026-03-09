@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     enable_pgvector: bool = False
     poll_interval_seconds: int = 10
+    recruiter_leads_config: str | None = None
+    company_careers_config: str | None = None
+    rss_feeds_config: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

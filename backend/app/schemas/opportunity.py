@@ -12,6 +12,7 @@ class OpportunityIn(BaseModel):
     description: str = ""
     status: str = "new"
     notes: str = ""
+    external_id: str | None = None
 
 
 class OpportunityOut(OpportunityIn):
