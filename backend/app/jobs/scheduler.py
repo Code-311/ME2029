@@ -7,11 +7,13 @@ from app.services.ingestion import CONNECTORS, persist_items
 from app.services.scoring import score_opportunity
 from app.services.strategy import generate_plan
 from app.services.signals import generate_opportunity_signals
+from app.services.company_intelligence import run_company_intelligence_connector
 from app.models.opportunity import Opportunity
 from app.models.profile import UserProfile
 from app.models.job import JobRun
 from app.models.network import Company
 from app.services.events import EventBus
+from app.services.decision_engine import refresh_recommendations
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
@@ -122,6 +124,39 @@ def stale_check_job():
         db.close()
 
 
+
+
+def company_intelligence_job():
+    db: Session = SessionLocal()
+    run = _record_job_start(db, "company_intelligence")
+    try:
+        created = run_company_intelligence_connector(db)
+        _record_job_end(db, run, "success", created, f"company_signals={created}")
+        EventBus.bump("company_intelligence")
+    except Exception as exc:
+        logger.exception("company_intelligence_job_failed")
+        _record_job_end(db, run, "failed", 0, str(exc))
+        raise
+    finally:
+        db.close()
+
+
+
+def decision_engine_job():
+    db: Session = SessionLocal()
+    run = _record_job_start(db, "decision_engine")
+    try:
+        created = refresh_recommendations(db)
+        _record_job_end(db, run, "success", created, f"recommendations={created}")
+        EventBus.bump("decision_engine")
+    except Exception as exc:
+        logger.exception("decision_engine_job_failed")
+        _record_job_end(db, run, "failed", 0, str(exc))
+        raise
+    finally:
+        db.close()
+
+
 def start_scheduler():
     if scheduler.running:
         return
@@ -129,6 +164,8 @@ def start_scheduler():
     scheduler.add_job(rescore_job, "interval", minutes=20, id="rescore", replace_existing=True)
     scheduler.add_job(strategy_job, "interval", minutes=60, id="strategy", replace_existing=True)
     scheduler.add_job(stale_check_job, "interval", hours=6, id="stale", replace_existing=True)
+    scheduler.add_job(company_intelligence_job, "interval", minutes=45, id="company_intelligence", replace_existing=True)
+    scheduler.add_job(decision_engine_job, "interval", minutes=30, id="decision_engine", replace_existing=True)
     scheduler.start()
 
 

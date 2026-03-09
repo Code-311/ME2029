@@ -6,6 +6,7 @@ export default function OpportunityDetail({ params }: { params: { id: string } }
   const [opp, setOpp] = useState<any>();
   const [nodes, setNodes] = useState<any[]>([]);
   const [signals, setSignals] = useState<any[]>([]);
+  const [recommendations, setRecommendations] = useState<any[]>([]);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -15,6 +16,7 @@ export default function OpportunityDetail({ params }: { params: { id: string } }
         setOpp(await api(`/opportunities/${params.id}`));
         setNodes(await api(`/opportunities/${params.id}/network-recommendations`));
         setSignals(await api(`/opportunities/${params.id}/signals`));
+        setRecommendations(await api(`/recommendations?status=open`));
       } catch (e: any) {
         setError(e?.message || 'Failed to load opportunity');
       }
@@ -37,5 +39,6 @@ export default function OpportunityDetail({ params }: { params: { id: string } }
     </div>
     <div className='card'><h2 className='font-semibold mb-2'>Signals</h2>{signals.length === 0 ? <div className='text-sm text-slate-500'>No active signals.</div> : signals.map((s) => <div key={s.id} className='mb-2'><div className='font-medium'>{s.title}</div><div className='text-sm text-slate-600'>{s.details}</div></div>)}</div>
     <div className='card'><h2 className='font-semibold mb-2'>Recommended Network Entry Points</h2>{nodes.length === 0 ? <div className='text-sm text-slate-500'>No linked network nodes yet.</div> : nodes.map((n) => <div key={n.id}>{n.full_name} — {n.node_role_type} (Influence {n.influence_score}, Access {n.accessibility_score})</div>)}</div>
+    <div className='card'><h2 className='font-semibold mb-2'>Decision Engine Recommendations</h2>{recommendations.filter((r) => r.entity_type === 'opportunity' && r.entity_id === opp.id).slice(0, 5).map((r) => <div key={r.id} className='mb-2 border-b pb-2'><div className='font-medium'>{r.title}</div><div className='text-sm text-slate-600'>{r.reason_summary}</div><div className='text-xs text-slate-500'>{r.recommendation_type} · {r.urgency} · score {r.decision_score}</div></div>)}</div>
   </div>;
 }

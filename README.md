@@ -1,60 +1,30 @@
-# Career Intelligence Agent + Career Radar Dashboard (MVP+)
+# Career Radar (Locked MVP)
 
-## What this build improves
-This iteration hardens the original MVP with stronger explainable scoring, an actionable signal layer, scheduler observability, and more reliable SSE UX while preserving the same stack and local workflow.
+Career Radar is a compact career-intelligence MVP that ingests opportunities, scores them, derives signals, and produces deterministic action recommendations.
 
-## Architecture
-- **Backend**: FastAPI + SQLAlchemy + Alembic + APScheduler (`/backend`)
-- **Frontend**: Next.js + TypeScript + Tailwind (`/frontend`)
-- **DB**: PostgreSQL via Docker Compose
-- **Realtime**: SSE (`/api/v1/events/stream`) with event ids + heartbeat + frontend reconnect state.
-- **Adapters**: External job sources use connector adapters; strategy engine defaults deterministic and can switch via feature flag.
+## Architecture (high level)
+- **Backend:** FastAPI + SQLAlchemy + Alembic + APScheduler
+- **Frontend:** Next.js + TypeScript
+- **Database:** PostgreSQL
+- **Realtime:** SSE (`/api/v1/events/stream`)
+- **Data flows:**
+  - Opportunity ingest/connectors/CSV
+  - Scoring engine
+  - Opportunity signals + company intelligence signals
+  - Deterministic decision engine recommendations
+  - Scheduler + admin-triggered jobs
 
-## Core capabilities
-- Structured profile engine with seeded senior ops/governance/security persona.
-- Opportunity ingest (manual, CSV, mock connectors), CRUD, status updates.
-- Explainable scoring engine with weighted factors:
-  - profile alignment
-  - compensation fit
-  - geography fit
-  - leadership/seniority fit
-  - industry fit
-  - strategic value
-  - ease of absorption
-- Signal layer for opportunities/companies (`new_role_posted`, `comp_below_threshold`, `stale_opportunity`, `high_strategic_visibility`).
-- Network intelligence + top entry-point recommendations.
-- Weekly micro-actions + monthly strategy reviews.
-- Background automation (ingest/rescore/strategy/stale checks).
-- Job observability via persisted `job_runs` history and admin UI.
-
-## Scheduler behavior
-APScheduler starts on backend startup and runs:
-- ingest: every 30m
-- rescore: every 20m
-- strategy: every 60m
-- stale check/signals: every 6h
-
-Each run writes `job_runs` with status, processed count, timestamps, and summary. You can inspect via:
-- API: `GET /api/v1/admin/jobs/runs`
-- UI: `/admin`
-- Manual trigger: `POST /api/v1/admin/jobs/{ingest|rescore|strategy|stale}`
-
-## SSE behavior
-SSE is used (instead of WebSockets) for simple one-way dashboard refreshes and lower operational complexity.
-- Backend emits `id`, `data`, `retry`, and heartbeat comments.
-- Frontend deduplicates events by version and reconnects automatically.
-- UI shows realtime connection status badge.
-
-## Local run
+## Quick start
 ```bash
-cp .env.example .env
+cp .env.example .env 2>/dev/null || true
 make up
 ```
 
+Then open:
 - Frontend: http://localhost:3000
 - Backend docs: http://localhost:8000/docs
 
-## Useful commands
+Useful commands:
 ```bash
 make migrate
 make test-backend
@@ -63,16 +33,11 @@ make logs
 make down
 ```
 
-## Seed data
-On first backend startup, seed inserts:
-- sample transition profile
-- default scoring weights
-- feature flags
-- sample company + network node
-- seeded opportunity (pre-scored)
-- initial signals
+## Operations guide
+See **[HOWTO.md](./HOWTO.md)** for full local operation details, scheduler cadence, connector/recommendation behavior, troubleshooting, and current MVP limitations.
 
-## Known limitations / next steps
-- LLM strategy path currently reuses deterministic output when no provider integration is configured.
-- Auth/multi-user tenancy not implemented in v1.
-- Network view uses structured panel; graph visualization can be added later.
+## CI
+GitHub Actions runs backend and frontend validation on push and pull request.
+
+## MVP scope lock
+This repo is intentionally locked to a compact MVP. New major capabilities should be captured as future work, not added in this stabilization pass.
