@@ -1,49 +1,68 @@
 # Career Intelligence Agent + Career Radar Dashboard (MVP+)
 
 ## What this build improves
-This iteration hardens the original MVP with stronger explainable scoring, an actionable signal layer, scheduler observability, and more reliable SSE UX while preserving the same stack and local workflow.
+This iteration adds real external connector ingestion while preserving the existing FastAPI/Next/Postgres/scoring/signals/scheduler/SSE architecture.
 
-## Architecture
-- **Backend**: FastAPI + SQLAlchemy + Alembic + APScheduler (`/backend`)
-- **Frontend**: Next.js + TypeScript + Tailwind (`/frontend`)
-- **DB**: PostgreSQL via Docker Compose
-- **Realtime**: SSE (`/api/v1/events/stream`) with event ids + heartbeat + frontend reconnect state.
-- **Adapters**: External job sources use connector adapters; strategy engine defaults deterministic and can switch via feature flag.
+## Connector architecture
+All connectors now follow one shared flow:
 
-## Core capabilities
-- Structured profile engine with seeded senior ops/governance/security persona.
-- Opportunity ingest (manual, CSV, mock connectors), CRUD, status updates.
-- Explainable scoring engine with weighted factors:
-  - profile alignment
-  - compensation fit
-  - geography fit
-  - leadership/seniority fit
-  - industry fit
-  - strategic value
-  - ease of absorption
-- Signal layer for opportunities/companies (`new_role_posted`, `comp_below_threshold`, `stale_opportunity`, `high_strategic_visibility`).
-- Network intelligence + top entry-point recommendations.
-- Weekly micro-actions + monthly strategy reviews.
-- Background automation (ingest/rescore/strategy/stale checks).
-- Job observability via persisted `job_runs` history and admin UI.
+`connector fetch -> normalize (canonical payload) -> ingestion upsert -> score -> signals -> SSE bump`
+
+Implementation details:
+- Shared connector contract in `backend/app/services/connectors.py`.
+- Canonical normalized payload (`NormalizedOpportunityInput`) used by every connector.
+- Connector registry supports discovery + run-by-name.
+- Ingestion service enforces idempotent upsert via:
+  - `(source, external_id)` where available,
+  - `source_url` fallback,
+  - stable ingestion hash key fallback.
+- Connectors do not write DB tables directly.
+
+## Supported connectors
+- **CSV connector**
+  - robust header aliases (`organization/title/salary/job_url/id`, etc)
+  - safe numeric parsing for compensation
+  - supports external IDs for dedupe
+- **Recruiter leads connector**
+  - ingests structured recruiter lead CSV
+  - creates/updates recruiter network nodes (`PersonNode`)
+  - emits recruiter signals (`new_recruiter_contact`, `recruiter_lead_added`)
+  - optionally links recruiter-led opportunities through external IDs
+- **Company careers connector**
+  - configurable company list and careers URLs
+  - currently includes a real site-aware adapter for **Lever JSON** endpoints
+  - repeat runs are idempotent via external_id/source_url/ingest_key
+- **RSS connector**
+  - ingests configured RSS feeds and normalizes into opportunities
 
 ## Scheduler behavior
-APScheduler starts on backend startup and runs:
+APScheduler continues to run core jobs and now supports connector jobs safely:
 - ingest: every 30m
 - rescore: every 20m
 - strategy: every 60m
 - stale check/signals: every 6h
+- connector jobs (non-CSV): every 45m each
 
-Each run writes `job_runs` with status, processed count, timestamps, and summary. You can inspect via:
-- API: `GET /api/v1/admin/jobs/runs`
-- UI: `/admin`
-- Manual trigger: `POST /api/v1/admin/jobs/{ingest|rescore|strategy|stale}`
+Each run persists `job_runs` with counts and summary fields (fetched/created/updated/skipped/errored where available).
 
-## SSE behavior
-SSE is used (instead of WebSockets) for simple one-way dashboard refreshes and lower operational complexity.
-- Backend emits `id`, `data`, `retry`, and heartbeat comments.
-- Frontend deduplicates events by version and reconnects automatically.
-- UI shows realtime connection status badge.
+## Admin API + UI
+New admin APIs:
+- `GET /api/v1/admin/connectors`
+- `POST /api/v1/admin/connectors/{connector_name}/run`
+- `GET /api/v1/admin/connectors/outcomes`
+
+Admin UI (`/admin`) now shows:
+- available connectors and run controls
+- recent connector outcomes
+- existing job run history
+
+## Configuration
+Set connector source configuration through env vars:
+- `RECRUITER_LEADS_CONFIG` (JSON)
+- `COMPANY_CAREERS_CONFIG` (JSON)
+- `RSS_FEEDS_CONFIG` (JSON)
+
+See `.env.example` for working examples.
 
 ## Local run
 ```bash
@@ -63,16 +82,9 @@ make logs
 make down
 ```
 
-## Seed data
-On first backend startup, seed inserts:
-- sample transition profile
-- default scoring weights
-- feature flags
-- sample company + network node
-- seeded opportunity (pre-scored)
-- initial signals
-
-## Known limitations / next steps
-- LLM strategy path currently reuses deterministic output when no provider integration is configured.
-- Auth/multi-user tenancy not implemented in v1.
-- Network view uses structured panel; graph visualization can be added later.
+## Adding a new connector
+1. Implement `BaseConnector.fetch()` in `backend/app/services/connectors.py`.
+2. Return `ConnectorPayload` with normalized opportunity data.
+3. Register connector class in `ConnectorRegistry`.
+4. Optionally add config in settings/env and admin trigger.
+5. Add tests for normalization + ingestion behavior.
