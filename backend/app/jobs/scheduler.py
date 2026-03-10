@@ -3,6 +3,7 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
+from app.services.ingestion import CONNECTORS, persist_items
 from app.services.ingestion import ingest_connector
 from app.services.scoring import score_opportunity
 from app.services.strategy import generate_plan
@@ -56,6 +57,19 @@ def ingest_job():
     db: Session = SessionLocal()
     run = _record_job_start(db, "ingest")
     try:
+        rows = []
+        for c in CONNECTORS:
+            connector_rows = c.fetch()
+            rows.extend(connector_rows)
+            logger.info("connector_fetch", extra={"connector": c.source, "count": len(connector_rows)})
+        created, stats = persist_items(db, rows)
+        profile = db.query(UserProfile).first()
+        for opp in created:
+            if profile:
+                score_opportunity(db, opp, profile)
+        db.commit()
+        generated_signals = generate_opportunity_signals(db, profile)
+        _record_job_end(db, run, "success", len(created), f"fetched={len(rows)} created={stats['created']} updated={stats['updated']} skipped={stats['skipped']} signals={generated_signals}")
         totals = {"fetched": 0, "created": 0, "updated": 0, "errored": 0}
         for c in registry.list():
             if c["name"] == "csv":

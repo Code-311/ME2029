@@ -13,6 +13,8 @@ class Opportunity(Base):
     location: Mapped[str] = mapped_column(String(120))
     estimated_compensation: Mapped[float] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(80))
+    external_id: Mapped[str] = mapped_column(String(160), default="")
+    ingestion_key: Mapped[str] = mapped_column(String(255), unique=True, index=True, default="")
     source_url: Mapped[str] = mapped_column(String(255), default="")
     description: Mapped[str] = mapped_column(Text)
     discovered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
