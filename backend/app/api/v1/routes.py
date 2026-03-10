@@ -1,3 +1,4 @@
+from datetime import datetime
 import asyncio
 import json
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
@@ -22,7 +23,8 @@ from app.schemas.signal import SignalOut, JobRunOut
 from app.schemas.company_signal import CompanySignalOut
 from app.schemas.recommendation import RecommendationOut
 from app.services.scoring import score_opportunity, get_weights
-from app.services.ingestion import CONNECTORS, parse_csv, persist_items
+from app.services.ingestion import parse_csv, persist_items, ingest_connector, run_all_connectors
+from app.services.connectors import registry
 from app.services.strategy import generate_plan
 from app.services.company_intelligence import run_company_intelligence_connector
 from app.services.signals import generate_opportunity_signals
@@ -59,6 +61,7 @@ def _opp_out(opp: Opportunity) -> dict:
         "description": opp.description,
         "status": opp.status,
         "notes": opp.notes,
+        "external_id": opp.external_id,
         "discovered_at": opp.discovered_at,
         "score_total": opp.score_total,
         "score_breakdown": breakdown,
@@ -197,6 +200,49 @@ async def ingest_csv(file: UploadFile, db: Session = Depends(get_db)):
     recommendation_count = refresh_recommendations(db)
     EventBus.bump("ingest_csv")
     return {"created": len(created), "signals": signal_count, "recommendations": recommendation_count}
+
+
+@router.get("/admin/connectors")
+def list_connectors():
+    return registry.list()
+
+
+@router.post("/admin/connectors/{connector_name}/run")
+def run_connector(connector_name: str, payload: dict | None = None, db: Session = Depends(get_db)):
+    run = JobRun(job_name=f"connector:{connector_name}", status="running", started_at=datetime.utcnow(), summary="")
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    try:
+        result, errors = ingest_connector(db, connector_name, payload or {})
+        run.status = "success"
+        run.processed_count = result.created + result.updated
+        run.summary = (
+            f"fetched={result.fetched} created={result.created} "
+            f"updated={result.updated} skipped={result.skipped} errored={result.errored}"
+        )
+        if errors:
+            run.summary += f" errors={';'.join(errors[:2])}"
+        run.finished_at = datetime.utcnow()
+        db.commit()
+        return {"connector": connector_name, "result": result.__dict__, "errors": errors}
+    except Exception as exc:
+        run.status = "failed"
+        run.summary = str(exc)
+        run.finished_at = datetime.utcnow()
+        db.commit()
+        raise
+
+
+@router.get("/admin/connectors/outcomes")
+def connector_outcomes(db: Session = Depends(get_db)):
+    return (
+        db.query(JobRun)
+        .filter(JobRun.job_name.like("connector:%"))
+        .order_by(JobRun.started_at.desc())
+        .limit(50)
+        .all()
+    )
 
 
 @router.post("/rescore")
