@@ -18,6 +18,8 @@ class Opportunity(Base):
     discovered_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     status: Mapped[str] = mapped_column(String(80), default="new")
     notes: Mapped[str] = mapped_column(Text, default="")
+    external_id: Mapped[str | None] = mapped_column(String(140), nullable=True)
+    ingest_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     score_total: Mapped[float] = mapped_column(Float, default=0)
     score_breakdown: Mapped[str] = mapped_column(Text, default="{}")
     score_explanation: Mapped[str] = mapped_column(Text, default="")

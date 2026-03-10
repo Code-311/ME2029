@@ -3,26 +3,18 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
-from app.services.ingestion import CONNECTORS, persist_items
+from app.services.ingestion import ingest_connector
 from app.services.scoring import score_opportunity
 from app.services.strategy import generate_plan
 from app.services.signals import generate_opportunity_signals
 from app.models.opportunity import Opportunity
 from app.models.profile import UserProfile
 from app.models.job import JobRun
-from app.models.network import Company
 from app.services.events import EventBus
+from app.services.connectors import registry
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
-
-def _ensure_company_link(db: Session, opp: Opportunity) -> None:
-    company = db.query(Company).filter(Company.name == opp.company).first()
-    if not company:
-        company = Company(name=opp.company, industry="")
-        db.add(company)
-        db.flush()
-    opp.company_id = company.id
 
 
 def _record_job_start(db: Session, job_name: str) -> JobRun:
@@ -41,24 +33,44 @@ def _record_job_end(db: Session, run: JobRun, status: str, processed: int, summa
     db.commit()
 
 
+def run_connector_job(connector_name: str | None = None):
+    db: Session = SessionLocal()
+    target = connector_name or "company_careers"
+    run = _record_job_start(db, f"connector:{target}")
+    try:
+        result, errors = ingest_connector(db, target)
+        summary = f"fetched={result.fetched} created={result.created} updated={result.updated} skipped={result.skipped} errored={result.errored}"
+        if errors:
+            summary += f" errors={';'.join(errors[:2])}"
+        _record_job_end(db, run, "success", result.created + result.updated, summary)
+    except Exception as exc:
+        logger.exception("connector_job_failed", extra={"connector": target})
+        _record_job_end(db, run, "failed", 0, str(exc))
+        raise
+    finally:
+        db.close()
+
+
 def ingest_job():
     db: Session = SessionLocal()
     run = _record_job_start(db, "ingest")
     try:
-        rows = []
-        for c in CONNECTORS:
-            connector_rows = c.fetch()
-            rows.extend(connector_rows)
-            logger.info("connector_fetch", extra={"connector": c.source, "count": len(connector_rows)})
-        created = persist_items(db, rows)
-        profile = db.query(UserProfile).first()
-        for opp in created:
-            _ensure_company_link(db, opp)
-            if profile:
-                score_opportunity(db, opp, profile)
-        db.commit()
-        generated_signals = generate_opportunity_signals(db, profile)
-        _record_job_end(db, run, "success", len(created), f"ingested={len(created)} signals={generated_signals}")
+        totals = {"fetched": 0, "created": 0, "updated": 0, "errored": 0}
+        for c in registry.list():
+            if c["name"] == "csv":
+                continue
+            result, _ = ingest_connector(db, c["name"])
+            totals["fetched"] += result.fetched
+            totals["created"] += result.created
+            totals["updated"] += result.updated
+            totals["errored"] += result.errored
+        _record_job_end(
+            db,
+            run,
+            "success",
+            totals["created"] + totals["updated"],
+            f"fetched={totals['fetched']} created={totals['created']} updated={totals['updated']} errored={totals['errored']}",
+        )
         EventBus.bump("ingest")
     except Exception as exc:
         logger.exception("ingest_job_failed")
@@ -129,6 +141,10 @@ def start_scheduler():
     scheduler.add_job(rescore_job, "interval", minutes=20, id="rescore", replace_existing=True)
     scheduler.add_job(strategy_job, "interval", minutes=60, id="strategy", replace_existing=True)
     scheduler.add_job(stale_check_job, "interval", hours=6, id="stale", replace_existing=True)
+    for c in registry.list():
+        if c["name"] in {"csv"}:
+            continue
+        scheduler.add_job(run_connector_job, "interval", minutes=45, id=f"connector_{c['name']}", replace_existing=True, kwargs={"connector_name": c["name"]})
     scheduler.start()
 
 
