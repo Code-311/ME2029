@@ -5,7 +5,9 @@ from app.models.network import Company, PersonNode
 from app.models.strategy import ActionPlanItem
 from app.models.config import ScoringWeight, FeatureFlag
 from app.models.signal import Signal
+from app.models.company_signal import CompanySignal
 from app.models.job import JobRun
+from app.models.recommendation import Recommendation
 
 __all__ = [
     "Base",
@@ -17,5 +19,7 @@ __all__ = [
     "ScoringWeight",
     "FeatureFlag",
     "Signal",
+    "CompanySignal",
     "JobRun",
+    "Recommendation",
 ]

@@ -12,17 +12,23 @@ from app.models.strategy import ActionPlanItem
 from app.models.config import ScoringWeight, FeatureFlag
 from app.models.signal import Signal
 from app.models.job import JobRun
+from app.models.company_signal import CompanySignal
+from app.models.recommendation import Recommendation
 from app.schemas.profile import ProfileBase, ProfileOut
 from app.schemas.opportunity import OpportunityIn, OpportunityOut
 from app.schemas.network import CompanyIn, CompanyOut, PersonNodeIn, PersonNodeOut
 from app.schemas.strategy import ActionPlanOut
 from app.schemas.signal import SignalOut, JobRunOut
+from app.schemas.company_signal import CompanySignalOut
+from app.schemas.recommendation import RecommendationOut
 from app.services.scoring import score_opportunity, get_weights
 from app.services.ingestion import CONNECTORS, parse_csv, persist_items
 from app.services.strategy import generate_plan
+from app.services.company_intelligence import run_company_intelligence_connector
 from app.services.signals import generate_opportunity_signals
+from app.services.decision_engine import refresh_recommendations
 from app.services.events import EventBus
-from app.jobs.scheduler import ingest_job, rescore_job, strategy_job, stale_check_job
+from app.jobs.scheduler import ingest_job, rescore_job, strategy_job, stale_check_job, company_intelligence_job, decision_engine_job
 
 router = APIRouter()
 
@@ -134,6 +140,7 @@ def create_opportunity(payload: OpportunityIn, db: Session = Depends(get_db)):
         score_opportunity(db, opp, profile)
     db.commit()
     generate_opportunity_signals(db, profile)
+    refresh_recommendations(db)
     EventBus.bump("opportunity_created")
     return _opp_out(opp)
 
@@ -145,6 +152,7 @@ def update_opp_status(opp_id: int, status: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Not found")
     opp.status = status
     db.commit()
+    refresh_recommendations(db)
     EventBus.bump("opportunity_status")
     return _opp_out(opp)
 
@@ -168,8 +176,9 @@ def ingest_connectors(db: Session = Depends(get_db)):
             score_opportunity(db, opp, profile)
         db.commit()
     signal_count = generate_opportunity_signals(db, profile)
+    recommendation_count = refresh_recommendations(db)
     EventBus.bump("ingest_connectors")
-    return {"created": len(created), "signals": signal_count}
+    return {"created": len(created), "signals": signal_count, "recommendations": recommendation_count}
 
 
 @router.post("/ingest/csv")
@@ -185,8 +194,9 @@ async def ingest_csv(file: UploadFile, db: Session = Depends(get_db)):
             score_opportunity(db, opp, profile)
         db.commit()
     signal_count = generate_opportunity_signals(db, profile)
+    recommendation_count = refresh_recommendations(db)
     EventBus.bump("ingest_csv")
-    return {"created": len(created), "signals": signal_count}
+    return {"created": len(created), "signals": signal_count, "recommendations": recommendation_count}
 
 
 @router.post("/rescore")
@@ -200,8 +210,9 @@ def rescore(db: Session = Depends(get_db)):
         count += 1
     db.commit()
     signal_count = generate_opportunity_signals(db, profile)
+    recommendation_count = refresh_recommendations(db)
     EventBus.bump("rescore")
-    return {"status": "done", "rescored": count, "signals": signal_count}
+    return {"status": "done", "rescored": count, "signals": signal_count, "recommendations": recommendation_count}
 
 
 @router.get("/signals", response_model=list[SignalOut])
@@ -212,6 +223,58 @@ def list_signals(signal_type: str | None = None, severity: str | None = None, db
     if severity:
         q = q.filter(Signal.severity == severity)
     return q.order_by(Signal.created_at.desc()).all()
+
+
+@router.get("/company-signals", response_model=list[CompanySignalOut])
+def list_company_signals(company_id: int | None = None, signal_type: str | None = None, db: Session = Depends(get_db)):
+    q = db.query(CompanySignal)
+    if company_id is not None:
+        q = q.filter(CompanySignal.company_id == company_id)
+    if signal_type:
+        q = q.filter(CompanySignal.signal_type == signal_type)
+    return q.order_by(CompanySignal.detected_at.desc()).all()
+
+
+@router.post("/ingest/company-intelligence")
+def ingest_company_intelligence(db: Session = Depends(get_db)):
+    created = run_company_intelligence_connector(db)
+    recommendation_count = refresh_recommendations(db)
+    EventBus.bump("company_intelligence_ingest")
+    return {"created": created, "recommendations": recommendation_count}
+
+
+
+
+@router.get("/recommendations", response_model=list[RecommendationOut])
+def list_recommendations(
+    recommendation_type: str | None = None,
+    status: str | None = None,
+    urgency: str | None = None,
+    db: Session = Depends(get_db),
+):
+    q = db.query(Recommendation)
+    if recommendation_type:
+        q = q.filter(Recommendation.recommendation_type == recommendation_type)
+    if status:
+        q = q.filter(Recommendation.status == status)
+    if urgency:
+        q = q.filter(Recommendation.urgency == urgency)
+    return q.order_by(Recommendation.decision_score.desc(), Recommendation.created_at.desc()).all()
+
+
+@router.post("/recommendations/refresh")
+def refresh_decisions(db: Session = Depends(get_db)):
+    created = refresh_recommendations(db)
+    EventBus.bump("recommendations_refresh")
+    return {"created": created}
+
+
+@router.get("/recommendations/{recommendation_id}", response_model=RecommendationOut)
+def recommendation_detail(recommendation_id: int, db: Session = Depends(get_db)):
+    rec = db.get(Recommendation, recommendation_id)
+    if not rec:
+        raise HTTPException(404, "Not found")
+    return rec
 
 
 @router.get("/companies", response_model=list[CompanyOut])
@@ -226,6 +289,11 @@ def create_company(payload: CompanyIn, db: Session = Depends(get_db)):
     db.commit()
     EventBus.bump("company_create")
     return c
+
+
+@router.get("/companies/{company_id}/signals", response_model=list[CompanySignalOut])
+def company_signals(company_id: int, db: Session = Depends(get_db)):
+    return db.query(CompanySignal).filter(CompanySignal.company_id == company_id).order_by(CompanySignal.detected_at.desc()).all()
 
 
 @router.get("/nodes", response_model=list[PersonNodeOut])
@@ -319,7 +387,7 @@ def job_runs(db: Session = Depends(get_db)):
 
 @router.post("/admin/jobs/{job_name}")
 def run_job(job_name: str):
-    jobs = {"ingest": ingest_job, "rescore": rescore_job, "strategy": strategy_job, "stale": stale_check_job}
+    jobs = {"ingest": ingest_job, "rescore": rescore_job, "strategy": strategy_job, "stale": stale_check_job, "company_intelligence": company_intelligence_job, "decision_engine": decision_engine_job}
     if job_name not in jobs:
         raise HTTPException(404, "unknown job")
     jobs[job_name]()
