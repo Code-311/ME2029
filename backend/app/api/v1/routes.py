@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 from datetime import datetime
 import asyncio
 import json
@@ -19,6 +21,11 @@ from app.schemas.network import CompanyIn, CompanyOut, PersonNodeIn, PersonNodeO
 from app.schemas.strategy import ActionPlanOut
 from app.schemas.signal import SignalOut, JobRunOut
 from app.services.scoring import score_opportunity, get_weights
+from app.services.ingestion import CONNECTORS, parse_csv, persist_items, connector_registry, CSVConnector, RecruiterLeadsConnector, RSSFeedConnector, GreenhouseConnector
+from app.services.strategy import generate_plan
+from app.services.signals import generate_opportunity_signals
+from app.services.events import EventBus
+from app.jobs.scheduler import ingest_job, rescore_job, strategy_job, stale_check_job
 from app.services.ingestion import parse_csv, persist_items, ingest_connector, run_all_connectors
 from app.services.connectors import registry
 from app.services.strategy import generate_plan
@@ -128,6 +135,11 @@ def get_opportunity(opp_id: int, db: Session = Depends(get_db)):
 
 @router.post("/opportunities", response_model=OpportunityOut)
 def create_opportunity(payload: OpportunityIn, db: Session = Depends(get_db)):
+    data = payload.model_dump()
+    raw = f"{data.get('source','manual')}|{data.get('source_url','')}|{data.get('company','')}|{data.get('role_title','')}|{data.get('location','')}"
+    data["ingestion_key"] = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    data["external_id"] = data.get("source_url", "")
+    opp = Opportunity(**data)
     opp = Opportunity(**payload.model_dump())
     db.add(opp)
     db.flush()
@@ -159,6 +171,18 @@ def opportunity_signals(opp_id: int, db: Session = Depends(get_db)):
 
 @router.post("/ingest/connectors")
 def ingest_connectors(db: Session = Depends(get_db)):
+    rows = []
+    for c in CONNECTORS:
+        rows.extend(c.fetch())
+    created, stats = persist_items(db, rows)
+    profile = db.query(UserProfile).first()
+    if profile:
+        for opp in created:
+            score_opportunity(db, opp, profile)
+        db.commit()
+    signal_count = generate_opportunity_signals(db, profile)
+    EventBus.bump("ingest_connectors")
+    return {"created": stats["created"], "updated": stats["updated"], "skipped": stats["skipped"], "signals": signal_count}
     results = run_all_connectors(db)
     return {"results": {k: v.__dict__ for k, v in results.items()}}
 
@@ -167,6 +191,7 @@ def ingest_connectors(db: Session = Depends(get_db)):
 async def ingest_csv(file: UploadFile, db: Session = Depends(get_db)):
     content = (await file.read()).decode()
     rows = parse_csv(content)
+    created, stats = persist_items(db, rows)
     created = persist_items(db, rows)
     for opp in created:
         _ensure_company_link(db, opp)
@@ -177,6 +202,7 @@ async def ingest_csv(file: UploadFile, db: Session = Depends(get_db)):
         db.commit()
     signal_count = generate_opportunity_signals(db, profile)
     EventBus.bump("ingest_csv")
+    return {"created": stats["created"], "updated": stats["updated"], "skipped": stats["skipped"], "signals": signal_count}
     return {"created": len(created), "signals": signal_count}
 
 
@@ -346,6 +372,40 @@ def set_flags(payload: dict[str, bool], db: Session = Depends(get_db)):
     return payload
 
 
+
+
+@router.get("/admin/connectors")
+def list_connectors():
+    return {"connectors": sorted(connector_registry().keys())}
+
+
+@router.post("/admin/connectors/{name}/run")
+def run_connector(name: str, payload: dict | None = None, db: Session = Depends(get_db)):
+    payload = payload or {}
+    if name == "csv":
+        connector = CSVConnector(payload.get("content", ""), source_name=payload.get("source", "csv"))
+    elif name == "recruiter_leads":
+        connector = RecruiterLeadsConnector(payload.get("content", ""))
+    elif name == "rss_feed":
+        connector = RSSFeedConnector(payload.get("feed_url", ""))
+    elif name == "company_careers":
+        connector = GreenhouseConnector(payload.get("company", "Unknown Co"), payload.get("board_token", ""))
+    else:
+        preset = connector_registry().get(name)
+        if not preset:
+            raise HTTPException(404, "unknown connector")
+        connector = preset
+
+    rows = connector.fetch()
+    created, stats = persist_items(db, rows)
+    profile = db.query(UserProfile).first()
+    if profile:
+        for opp in created:
+            score_opportunity(db, opp, profile)
+        db.commit()
+    signal_count = generate_opportunity_signals(db, profile)
+    EventBus.bump(f"connector:{name}")
+    return {"connector": name, "fetched": len(rows), **stats, "signals": signal_count}
 @router.get("/admin/jobs/runs", response_model=list[JobRunOut])
 def job_runs(db: Session = Depends(get_db)):
     return db.query(JobRun).order_by(JobRun.started_at.desc()).limit(50).all()
@@ -353,6 +413,7 @@ def job_runs(db: Session = Depends(get_db)):
 
 @router.post("/admin/jobs/{job_name}")
 def run_job(job_name: str):
+    jobs = {"ingest": ingest_job, "rescore": rescore_job, "strategy": strategy_job, "stale": stale_check_job}
     jobs = {"ingest": ingest_job, "rescore": rescore_job, "strategy": strategy_job, "stale": stale_check_job, "connector": run_connector_job}
     if job_name not in jobs:
         raise HTTPException(404, "unknown job")
