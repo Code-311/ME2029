@@ -46,7 +46,7 @@ export default function OpportunitiesPage() {
     <div className='card overflow-auto'>
       <table className='w-full text-sm'>
         <thead><tr><th className='text-left'>Company</th><th className='text-left'>Role</th><th>Score</th><th>Status</th><th className='text-left'>Signals</th></tr></thead>
-        <tbody>{filtered.map((i) => <tr key={i.id} className='border-t align-top'><td><Link className='text-blue-600 font-medium' href={`/opportunities/${i.id}`}>{i.company}</Link></td><td>{i.role_title}</td><td className='text-center'>{i.score_total}</td><td className='text-center'>{i.status}</td><td>{(signalMap[i.id] || []).slice(0, 2).map((s) => <span key={s.id} className='inline-block mr-1 mb-1 px-2 py-0.5 rounded bg-slate-100'>{s.signal_type}</span>)}</td></tr>)}</tbody>
+        <tbody>{filtered.map((i) => <tr key={i.id} className='border-t align-top'><td><Link className='text-blue-600 font-medium' href={`/opportunities/${i.id}`}>{i.company}</Link></td><td>{i.role_title}</td><td className='text-center'>{i.score_total}</td><td className='text-center'>{i.status}</td><td>{(signalMap[i.id] || []).slice(0, 2).map((s: { id: number; signal_type: string }) => <span key={s.id} className='inline-block mr-1 mb-1 px-2 py-0.5 rounded bg-slate-100'>{s.signal_type}</span>)}</td></tr>)}</tbody>
       </table>
     </div>
   </div>

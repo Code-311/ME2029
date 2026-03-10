@@ -23,7 +23,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     throw new ApiError(res.status, await res.text());
   }
-  return res.json();
+  return (await res.json()) as T;
 }
 
 export { API };
